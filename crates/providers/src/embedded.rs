@@ -26,6 +26,17 @@ use serde_json::{json, Value};
 /// 进程内通知回调（kind, payload_json, user_data）。
 pub type NotifyCallback = unsafe extern "C" fn(*const c_char, *const c_char, *mut c_void);
 
+/// 跨线程安全的 user_data 指针（FFI 回调的不透明上下文）。
+///
+/// 裸指针 `*mut c_void` 默认不实现 Send / Sync；这里显式声明它是安全的：
+/// user_data 由 Dart 侧持有，生命周期覆盖整个回调注册期，跨线程只传指针、不解引用。
+#[derive(Clone, Copy)]
+pub struct UserData(pub *mut c_void);
+
+// SAFETY: 见 UserData 文档注释。
+unsafe impl Send for UserData {}
+unsafe impl Sync for UserData {}
+
 /// 账号 / 账本 / 设置的持久层抽象（进程内模式的存储后端）。
 pub trait AccountStore: Send + Sync {
     /// 读一条账号。`account` 为空串 = 该 provider 的队首账号。
@@ -60,7 +71,7 @@ pub trait AccountStore: Send + Sync {
 /// 进程内网关：实现 `CallGateway`，把回调直连到 [`AccountStore`]。
 pub struct EmbeddedGateway {
     store: Arc<dyn AccountStore>,
-    notify: Mutex<Option<(NotifyCallback, *mut c_void)>>,
+    notify: Mutex<Option<(NotifyCallback, UserData)>>,
 }
 
 impl EmbeddedGateway {
@@ -72,7 +83,7 @@ impl EmbeddedGateway {
     }
 
     /// 设置进程内通知回调（models_changed / auth_changed 经此回调到宿主）。
-    pub fn set_notify_callback(&self, cb: NotifyCallback, user_data: *mut c_void) {
+    pub fn set_notify_callback(&self, cb: NotifyCallback, user_data: UserData) {
         let mut guard = self.notify.lock().unwrap_or_else(|p| p.into_inner());
         *guard = Some((cb, user_data));
     }
@@ -155,7 +166,7 @@ impl EmbeddedGateway {
                 let cpayload =
                     CString::new(serde_json::to_string(&payload).unwrap_or_default())
                         .unwrap_or_default();
-                unsafe { cb(ckind.as_ptr(), cpayload.as_ptr(), ud) };
+                unsafe { cb(ckind.as_ptr(), cpayload.as_ptr(), ud.0) };
             }
             Ok(Value::Null)
         }

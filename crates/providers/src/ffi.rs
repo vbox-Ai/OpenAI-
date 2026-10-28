@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::ffi::{c_void, CStr, CString};
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use agent2api_provider_protocol as proto;
 use agent2api_provider_sdk::provider::SinkInner;
@@ -16,14 +16,15 @@ use agent2api_provider_sdk::serve::Cancel;
 use agent2api_provider_sdk::{EmbeddedHost, SendFuture};
 use serde_json::Value;
 
-use crate::embedded::{memory_gateway, EmbeddedGateway, NotifyCallback};
+use crate::embedded::{memory_gateway, EmbeddedGateway, NotifyCallback, UserData};
 use crate::providers;
 
 static HOST: OnceLock<Arc<EmbeddedHost>> = OnceLock::new();
 static GATEWAY: OnceLock<Arc<EmbeddedGateway>> = OnceLock::new();
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static NEXT_CONV_ID: AtomicU64 = AtomicU64::new(1);
-static CONVERSATIONS: Mutex<HashMap<u64, Arc<Cancel>>> = Mutex::new(HashMap::new());
+static CONVERSATIONS: LazyLock<Mutex<HashMap<u64, Arc<Cancel>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// 初始化进程内宿主。返回 0 = 成功，非 0 = 失败。
 ///
@@ -148,7 +149,7 @@ pub extern "C" fn agent2api_providers_set_notify_callback(
     user_data: *mut c_void,
 ) {
     if let (Some(cb), Some(gateway)) = (cb, GATEWAY.get()) {
-        gateway.set_notify_callback(cb, user_data);
+        gateway.set_notify_callback(cb, UserData(user_data));
     }
 }
 
@@ -161,7 +162,7 @@ pub type ConversationDoneCallback = unsafe extern "C" fn(i32, *const c_char, *mu
 struct FfiSink {
     on_head: ConversationChunkCallback,
     on_chunk: ConversationChunkCallback,
-    user_data: *mut c_void,
+    user_data: UserData,
 }
 
 impl SinkInner for FfiSink {
@@ -170,7 +171,7 @@ impl SinkInner for FfiSink {
         let ud = self.user_data;
         Box::pin(async move {
             if let Ok(json) = serde_json::to_vec(&head) {
-                unsafe { cb(json.as_ptr(), json.len(), ud) };
+                unsafe { cb(json.as_ptr(), json.len(), ud.0) };
             }
             Ok(())
         })
@@ -179,7 +180,7 @@ impl SinkInner for FfiSink {
         let cb = self.on_chunk;
         let ud = self.user_data;
         Box::pin(async move {
-            unsafe { cb(bytes.as_ptr(), bytes.len(), ud) };
+            unsafe { cb(bytes.as_ptr(), bytes.len(), ud.0) };
             Ok(())
         })
     }
@@ -216,6 +217,7 @@ pub extern "C" fn agent2api_providers_conversation_start(
         map.insert(id, cancel);
     }
 
+    let ud = UserData(user_data);
     let Some(runtime) = RUNTIME.get() else {
         return 0;
     };
@@ -223,17 +225,17 @@ pub extern "C" fn agent2api_providers_conversation_start(
         let mut sink = FfiSink {
             on_head,
             on_chunk,
-            user_data,
+            user_data: ud,
         };
         let result = host.conversation(params, &mut sink).await;
         if let Ok(mut map) = CONVERSATIONS.lock() {
             map.remove(&id);
         }
         match result {
-            Ok(()) => unsafe { on_done(1, std::ptr::null(), user_data) },
+            Ok(()) => unsafe { on_done(1, std::ptr::null(), ud.0) },
             Err(e) => {
                 let cmsg = CString::new(e).unwrap_or_default();
-                unsafe { on_done(0, cmsg.as_ptr(), user_data) };
+                unsafe { on_done(0, cmsg.as_ptr(), ud.0) };
             }
         }
     });
