@@ -15,6 +15,7 @@ mod beijing;
 mod content_block;
 mod crypto;
 mod dpop;
+pub mod embedded;
 mod errors;
 mod flight;
 mod headers;
