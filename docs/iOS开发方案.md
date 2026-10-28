@@ -393,3 +393,156 @@ provider 的 token / refresh token 不能明文存沙盒文件，改存 iOS Keyc
 | OrcaTerm | 🟡 改路径 | Tauri store 明文路径 |
 | Antigravity / Accio / Trae / CodeArts / LobsterAI | 🟡 换 webview | loopback 回调换 flutter_inappwebview |
 | 其余（ModelScope、Cline、Kuku、MonkeyCode、OfficeAce、WorkBuddy 等） | 🟢 大概率能跑 | 改路径即可 |
+
+---
+
+## 12. 已知遗留（阶段 1 完成后待办）
+
+阶段 1（单进程化 + 剥 Tauri + FFI 骨架）已完成，以下 5 项是**已知遗留**，按严重度排序，均已在分阶段计划中，不是遗漏。
+
+### 12.1 流式对话（conversation）未接 FFI —— 🔴 阶段 2 前必须补
+
+`handle_conversation`（流式多帧）仍是 stdio 专有，未暴露给 FFI。`chat`（一问一答）能调，但流式输出拿不到。
+
+- **影响**：iOS 模型对话（流式输出）不可用
+- **方案**：FFI 回调机制（chunk 回调函数指针），见 §13 流式 FFI 回调设计
+- **计划**：阶段 2
+
+### 12.2 notify 回调被吞 —— 🟠
+
+`EmbeddedGateway` 里 `notify`（models_changed / auth_changed）→ 直接 `Ok(Null)`。
+
+- **影响**：账号 / 模型列表变化，Flutter UI 不自动刷新
+- **方案**：FFI 事件通道（Rust → Dart 回调）
+- **计划**：阶段 2 / 3
+
+### 12.3 store.update 的 public 字段未计算 —— 🟠
+
+stdio 模式 serve.rs 的 `CallHandle` 调 `adapter.account_view(&secret)` 算 public；embedded 模式 `EmbeddedGateway` 解耦拿不到 provider 实现，public 为空。
+
+- **影响**：账号列表 public 视图为空（UI 显示不了邮箱 / 昵称）
+- **缓解**：Flutter 层调 `account.view`（已暴露）现算
+- **计划**：阶段 2 / 3
+
+### 12.4 MemoryStore 是占位 —— 🟡
+
+真实持久层尚未实现，3 个 TODO：
+
+- 不落盘（重启即丢）
+- `mark_limited` 空实现（账号冷却 / 轮换失效）
+- `update` 按 id 全局找（未按 provider 分组）
+
+- **方案**：SQLite（账号 / 账本 / 设置）+ Keychain（凭证）
+- **计划**：阶段 3
+
+### 12.5 崩溃隔离未验证 —— 🟡
+
+单进程后，`guard()` / `catch_unwind` 对 29 家 provider 请求入口的覆盖率未实测。
+
+- **方案**：请求入口全覆盖 guard + 真机验证
+- **计划**：阶段 3 全量 provider 移植时验证
+
+---
+
+## 13. 流式 conversation 的 FFI 回调设计
+
+### 13.1 背景
+
+stdio 模式里，`handle_conversation` 用 `StreamSink`（实现 `SinkInner`）把每个 chunk 写 stdout。移动端没有 stdout，需要把 `SinkInner` 换成「回调 Dart 侧」的实现 —— 这是 §12.1 的核心补法。
+
+关键链路（SDK `provider.rs`）：
+
+```text
+Provider::conversation(ctx, req, sink)
+        └─ sink.head(head)   → SinkInner::send_head
+        └─ sink.send(bytes)  → SinkInner::send_chunk
+```
+
+只要写一个 `FfiSink: SinkInner`，把 `send_head` / `send_chunk` 改成调 C 回调，provider 代码一行不用动。
+
+### 13.2 C ABI 回调定义（长度前缀，防 NUL 字节）
+
+```c
+// chunk 是 OpenAI chat SSE 文本，但为防内嵌 NUL，用长度前缀而非 C 字符串
+typedef void (*ConversationChunkCallback)(
+    const uint8_t* data,   // 借用指针，回调返回后失效
+    size_t         len,
+    void*          user_data
+);
+
+typedef void (*ConversationDoneCallback)(
+    int32_t  ok,            // 1=正常结束, 0=出错
+    const char* error_json, // 出错时的消息（可空）
+    void*  user_data
+);
+```
+
+### 13.3 FfiSink（SDK 内实现）
+
+```rust
+struct FfiSink {
+    on_head: ConversationChunkCallback,
+    on_chunk: ConversationChunkCallback,
+    on_done: ConversationDoneCallback,
+    user_data: *mut c_void,
+}
+
+impl SinkInner for FfiSink {
+    fn send_head(&mut self, head: proto::StreamHead) -> SendFuture<()> {
+        // head → serde_json 序列化 → 字节 → on_head(ptr, len, user_data)
+        // 调用后立即释放中间缓冲
+    }
+    fn send_chunk(&mut self, bytes: &[u8]) -> SendFuture<()> {
+        // 原样转发：on_chunk(bytes.as_ptr(), bytes.len(), user_data)
+    }
+}
+```
+
+### 13.4 FFI 入口（providers 的 ffi.rs）
+
+```c
+// 发起流式对话，返回会话 id（0 = 失败）
+uint64_t agent2api_providers_conversation_start(
+    const char* params_json,          // proto::ConversationRequest 的 JSON
+    ConversationChunkCallback on_head,
+    ConversationChunkCallback on_chunk,
+    ConversationDoneCallback  on_done,
+    void* user_data
+);
+
+// 取消会话（Dart 侧 dispose 时调）
+void agent2api_providers_conversation_cancel(uint64_t id);
+```
+
+流程：
+
+1. `conversation_start` **同步**：解析 params → 找 provider → 构造 ctx → `runtime.spawn(conversation 任务)` → 返回 id
+2. 任务里 `provider.conversation(ctx, req, sink)` 跑起来，每个 chunk 经 `FfiSink` 回调 Dart
+3. 任务结束（Ok 或 Err）时回调 `on_done`
+
+### 13.5 线程模型与生命周期（关键约束）
+
+| 约束 | 说明 |
+|---|---|
+| 回调线程 | chunk 在 tokio worker 线程回调 Dart，**不是** Dart 主 isolate |
+| 回调不许阻塞 | 回调里只做「塞进 StreamController」，重活会卡死 tokio worker |
+| isolate 存活 | Dart 用 `NativeCallable.listener` + `keepIsolateAlive`，防回调期间 isolate 被回收 |
+| user_data 生命周期 | Dart 持有，会话结束（on_done 之后）才能释放 |
+| 背压 | 回调是 fire-and-forget，天然无背压；移动端内存足够，Dart 侧自行缓冲即可 |
+
+### 13.6 会话状态表
+
+```rust
+// providers/ffi.rs 内
+static CONVERSATIONS: Mutex<HashMap<u64, Cancel>> = ...;
+```
+
+- `conversation_start` 时插入，`on_done` / `cancel` 时移除
+- `conversation_cancel(id)` 触发 `Cancel`（复用 SDK 已有的取消机制，与 stdio 的 `abort` 同一套）
+
+### 13.7 实现位置与顺序
+
+1. SDK：`FfiSink`（实现 `SinkInner`）—— 因为 `SinkInner` 是 SDK 内部 trait
+2. providers：`ffi.rs` 加 `conversation_start` / `conversation_cancel` + 会话表
+3. SDK：`EmbeddedHost` 加 `conversation(...)` 方法（复用 `handle_conversation` 的 provider 查找 + ctx 构造，但 sink 换成 `FfiSink`）
+4. Dart：`NativeCallable` 包装 + StreamController 收 chunk
