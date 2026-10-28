@@ -61,6 +61,77 @@ Flutter APP（单进程，装进手机）
 
 ---
 
+## 2.5 网关/Host 层与单进程化的精确改造（核心盲区）
+
+### 2.5.1 网关是独立仓库，必须补上 host 层
+本仓库（`vbox-Ai/OpenAI-`）只是**插件侧**，真正的网关（host + UI）在
+另一个仓库 `aimod-cc/Agent2API`。移动端要独立成 APP，两条路：
+- 迁移 `aimod-cc/Agent2API`，参考其 host 层与 UI
+- **（推荐）自建轻量移动端 host 层**，只实现插件真正依赖的那部分
+
+### 2.5.2 移动端 host 层职责清单
+插件不是自包含的，它每步都回调网关（`methods::plugin` 命名空间）：
+- 账号存储：`store.get` / `store.list` / `store.update` / `store.mark_limited`
+- 额度账本：`store.ledger_get` / `store.ledger_put`
+- 设置：`settings.get` / `settings.set`
+- 握手：提供 `HostEnv`（data_dir / host_version / target / proxy / debug_traffic / loopback_port）
+- UI 渲染：收集 `ProviderInfo`（capabilities / account_features / admin_panels / checkin）
+
+### 2.5.3 单进程化精确改造清单
+| 现有代码 | 移动端改法 |
+|---|---|
+| `serve.rs` 的 stdin/stdout 帧循环 | 进程内 channel / 直接函数调用 |
+| `CallGateway::call`（8 个回调） | 直连移动端存储层（Keychain / SQLite） |
+| `SHUTDOWN` 的 `std::process::exit(0)` | 改优雅返回（否则杀掉整个 APP） |
+| `HostEnv` init 握手 | 直接构造：target=`aarch64-apple-ios`，loopback_port 给 OAuth |
+| `ProviderInfo` 握手 | 保留为进程内 init 查询，Flutter UI 渲染依赖它 |
+
+### 2.5.4 崩溃隔离（单进程下更关键）
+原架构靠「子进程崩溃只带走自己」；单进程后一个 panic 可能带走整个 APP。
+- 保留 `guard()` / `catch_unwind`（`main.rs` 已 deny unwrap/expect/panic）
+- 移动端必须确认**每个请求入口都包了 guard**，否则稳定性崩
+
+### 2.5.5 UI 策略
+插件自带 `ui/checkin` 页面（`pack.json` 的 `ui` 字段），桌面端由网关 iframe 托管。
+移动端二选一：
+- Flutter 重写签到中心 UI
+- webview 嵌入现有 `ui/checkin` 的 HTML/JS（改动小）
+
+### 2.5.6 数据模型
+网关存 `accounts.data`（账号 + 凭证 + 额度账本）。移动端等价设计：
+- 凭证（token / refresh token）→ **iOS Keychain**
+- 账号表 / 账本 / 设置 → **SQLite**（rusqlite bundled）
+
+---
+
+## 2.6 移动端特有功能项（补充）
+
+### 2.6.1 代理支持
+`HostEnv.proxy` 是插件出网的代理入口，很多 provider 的上游需要代理才能访问。
+- 移动端要接**系统代理 / 手动代理 / Clash 类工具**的配置
+- 参考现有 `proxy_util.rs` / `proxy.rs`，把代理地址写进 `HostEnv`
+
+### 2.6.2 后台定时签到
+签到是核心功能，桌面端靠定时任务触发（`ui/checkin/schedule.js`）。
+移动端后台定时方案：
+- 越狱：`launchd` 定时拉起签到，或 APP 内 `BGTaskScheduler`
+- 非越狱：依赖前台手动签到（iOS 后台限制）
+
+### 2.6.3 移动端更新机制（不走商店）
+越狱侧载不走上架，更新要自建：
+- 自建更新源（GitHub Releases），APP 内检查新版本并下载安装
+- 或复用桌面端 `plugin_host::update` 的资产匹配逻辑（`<id>-<version>-<target>.zip`）
+
+### 2.6.4 账号导入/迁移（可选）
+桌面端已有账号（`accounts.data`）搬到手机：提供**导出/导入**功能，
+凭证经 Keychain 落库，避免逐家重新登录。
+
+### 2.6.5 日志与崩溃上报
+移动端排障需要：本地日志落盘 + 崩溃堆栈捕获（`catch_unwind` 时记录），
+可选接 Crashlytics 或自建上报。
+
+---
+
 ## 3. 技术选型
 
 | 层 | 选型 | 理由 |
