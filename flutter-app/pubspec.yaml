@@ -11,6 +11,8 @@ dependencies:
     sdk: flutter
   # 手写 dart:ffi 绑定，不依赖 flutter_rust_bridge 代码生成（后续可换）
   ffi: ^2.1.0
+  # 复用网关 Web UI：用 webview 加载本地 HTTP 桥，而非 Flutter 重写 UI
+  flutter_inappwebview: ^6.0.0
 
 dev_dependencies:
   flutter_test:

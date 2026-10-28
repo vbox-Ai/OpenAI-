@@ -93,14 +93,26 @@ Flutter APP（单进程，装进手机）
 - 保留 `guard()` / `catch_unwind`（`main.rs` 已 deny unwrap/expect/panic）
 - 移动端必须确认**每个请求入口都包了 guard**，否则稳定性崩
 
-### 2.5.5 UI 策略：Flutter 全重写
-移动端 UI 面**全部用 Flutter 重写**（不 webview 嵌入），清单来自网关 Tauri 前端：
-- 账号管理（添加账号、登录弹窗、账号行、余额/用量）
-- 签到中心（签到总览、每日签到分组）
-- 报表（请求量、成功率、Token 消耗、热力图）
-- 模型管理（模型清单、倍率、上下文、映射）
-- 设置（网关 Key、代理、并发、定时任务、跨域、局域网访问）
-- 网关面板（管理员登录、Gateway Key 管理）
+### 2.5.5 UI 策略：复用网关 Web UI（webview），不重写
+
+网关是 Tauri 2 应用，其 UI 本身就是 **Web 前端**（HTML/JS/CSS，通过 HTTP 调本地
+Rust server）。移动端**直接复用这套 Web UI**，用 webview 加载，**不 Flutter 重写**。
+
+- UI 层：`flutter_inappwebview` 加载网关 Web UI（HTML/JS/CSS 原样搬）
+- 功能 100% 保留：账号管理、签到中心、报表、模型管理、设置、网关面板
+- 唯一新写：**本地 HTTP 桥 server**（复用网关 server 逻辑，底层从 spawn 插件
+  改成 FFI 调 `EmbeddedHost`），见 §14
+
+两条路对比结论：
+
+| 维度 | 复用 Web UI（✅ 采用） | Flutter 全重写 |
+|---|---|---|
+| UI 开发量 | ≈ 零 | 全部重写 |
+| 功能完整性 | 100% | 易漏 |
+| 出 ipa 速度 | 几天 | 数周 |
+| 手感 | 略逊（webview） | 原生最优 |
+
+结论：先复用 Web UI 快速出 ipa；后期只对高频页面（如对话页）单独 Flutter 原生化。
 
 ### 2.5.6 数据模型（参考网关 agent2api.db）
 网关把账号、日志、统计、配置、设置全放单个 SQLite `agent2api.db`。
@@ -546,3 +558,33 @@ static CONVERSATIONS: Mutex<HashMap<u64, Cancel>> = ...;
 2. providers：`ffi.rs` 加 `conversation_start` / `conversation_cancel` + 会话表
 3. SDK：`EmbeddedHost` 加 `conversation(...)` 方法（复用 `handle_conversation` 的 provider 查找 + ctx 构造，但 sink 换成 `FfiSink`）
 4. Dart：`NativeCallable` 包装 + StreamController 收 chunk
+
+---
+
+## 14. 本地 HTTP 桥 server（复用 Web UI 的关键块）
+
+复用网关 Web UI 的前提：Web UI 的 HTTP 请求要有地方接。移动端没有网关进程，
+所以要在 Rust 核心里起一个**本地 HTTP server**，承担三件事（一个 server 全包）：
+
+```text
+Web UI（webview 加载）──HTTP──→ 本地 HTTP server（127.0.0.1:3065）
+                                  ├─ GET  /            → 静态 HTML（Web UI）
+                                  ├─ GET  /assets/*    → 静态 JS/CSS
+                                  ├─ POST /api/*       → Web UI 自己的 API → FFI
+                                  └─ /v1/*             → OpenAI 兼容 API → FFI（§2.5.7）
+```
+
+### 14.1 实现要点
+
+- HTTP 框架：`axum`（轻量、tokio 原生）
+- 静态文件：网关 Web UI 打进二进制（`include_dir!`）或放沙盒 assets
+- API 路由：Web UI 每个端点 → 对应 FFI 方法（`EmbeddedHost::call` / `conversation`）
+- 复用：网关 server 的路由表在 `OpenAI-gateway-` 仓库里有现成实现，直接搬，底层从
+  spawn 插件改成 FFI
+
+### 14.2 顺序
+
+1. 从 `OpenAI-gateway-` 抄 Web UI 静态文件 → `flutter-app/assets/`
+2. Rust 起本地 HTTP server，先 serve 静态文件（解决 webview 白屏）
+3. 把网关 API 路由表搬到 server，底层接 FFI
+4. webview 指向 `127.0.0.1:3065`，功能全通
