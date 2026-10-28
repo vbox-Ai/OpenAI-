@@ -149,7 +149,7 @@ pub extern "C" fn agent2api_providers_set_notify_callback(
     user_data: *mut c_void,
 ) {
     if let (Some(cb), Some(gateway)) = (cb, GATEWAY.get()) {
-        gateway.set_notify_callback(cb, UserData(user_data));
+        gateway.set_notify_callback(cb, UserData::from_ptr(user_data));
     }
 }
 
@@ -171,7 +171,7 @@ impl SinkInner for FfiSink {
         let ud = self.user_data;
         Box::pin(async move {
             if let Ok(json) = serde_json::to_vec(&head) {
-                unsafe { cb(json.as_ptr(), json.len(), ud.0) };
+                unsafe { cb(json.as_ptr(), json.len(), ud.as_ptr()) };
             }
             Ok(())
         })
@@ -180,7 +180,7 @@ impl SinkInner for FfiSink {
         let cb = self.on_chunk;
         let ud = self.user_data;
         Box::pin(async move {
-            unsafe { cb(bytes.as_ptr(), bytes.len(), ud.0) };
+            unsafe { cb(bytes.as_ptr(), bytes.len(), ud.as_ptr()) };
             Ok(())
         })
     }
@@ -217,7 +217,7 @@ pub extern "C" fn agent2api_providers_conversation_start(
         map.insert(id, cancel);
     }
 
-    let ud = UserData(user_data);
+    let ud = UserData::from_ptr(user_data);
     let Some(runtime) = RUNTIME.get() else {
         return 0;
     };
@@ -232,10 +232,10 @@ pub extern "C" fn agent2api_providers_conversation_start(
             map.remove(&id);
         }
         match result {
-            Ok(()) => unsafe { on_done(1, std::ptr::null(), ud.0) },
+            Ok(()) => unsafe { on_done(1, std::ptr::null(), ud.as_ptr()) },
             Err(e) => {
                 let cmsg = CString::new(e).unwrap_or_default();
-                unsafe { on_done(0, cmsg.as_ptr(), ud.0) };
+                unsafe { on_done(0, cmsg.as_ptr(), ud.as_ptr()) };
             }
         }
     });
