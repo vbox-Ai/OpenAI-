@@ -20,6 +20,10 @@
 5. **仓库划分**：
    - `vbox-Ai/OpenAI-` = 原生提供商插件（主仓库，含 Flutter 端）
    - `vbox-Ai/OpenAI-web-` = 网页提供商插件（单独仓库）
+6. **构建方式**：iOS 端用 **GitHub Actions 的 macOS runner** 构建（本地是 Windows，编不了 iOS）；
+   Android 端用 Linux runner + NDK；Rust 核心先 `cargo build` 出静态库再链接进 Flutter。
+7. **许可与脱商标（AGPL-3.0）**：对外分发必须保留 AGPL-3.0 并提供完整源码；
+   项目名、logo、签名 `keyId`（原 `official-2026`）等一律改名，避免商标与来源混淆。
 
 ---
 
@@ -116,6 +120,33 @@ Flutter APP（单进程，装进手机）
 - **决策**：砍掉「国际版每日领 100 Credits」活动；核心（模型调用/登录/签到）不受影响
 - 进阶：逆向 runtime-info 用纯 Rust 重写（工作量大，暂缓）
 
+### 4.9 协议契约（provider-protocol）处理
+单进程后，stdin/stdout JSON 分帧协议失去意义，两种走法：
+- **走法 A（推荐）**：废弃分帧协议，provider 改成进程内直接函数调用；
+  `provider-protocol` 的 Request/Response/Frame 等类型保留复用为内部 API。
+- **走法 B**：保留协议层，FFI 仍按 JSON 序列化过线（多余开销，不推荐）。
+选走法 A：删掉 `frame`/`serve` 的 stdio 循环，保留类型定义。
+
+### 4.10 tokio 运行时与 Flutter 生命周期桥接
+- Rust 核心在 FFI 侧起一个 **tokio 多线程 runtime**（`tokio::runtime::Builder`）
+- flutter_rust_bridge 的 async 函数映射到 tokio future
+- APP 退出/进后台时显式 `runtime.shutdown_timeout()` 优雅停机
+- 禁止在 Dart 主 isolate 上跑阻塞 Rust 调用，统一走异步通道
+
+### 4.11 flutter-app 如何引用 Rust 代码
+三种方式，选一种写死在约定里：
+- **方式 A（推荐）**：`flutter-app/` 用相对路径引用 `../crates/`（只读引用，
+  不改源项目代码，满足「独立目录」边界）
+- 方式 B：把需要的 Rust 代码 vendor 进 `flutter-app/rust_core/`（完全隔离，但要维护副本）
+- 方式 C：git submodule（增加管理复杂度，不推荐）
+结论：走方式 A + `Cargo.toml` 的 path 依赖，源项目更新只影响 Rust 侧，Flutter 壳不动。
+
+### 4.12 TLS 依赖栈的 iOS 兼容（阶段 0 重点验证）
+- HTTP 客户端若用 `reqwest`：默认 TLS 走 native-tls（iOS 上依赖 Security.framework，可用）
+- 若走 rustls：确认 `ring`/`aws-lc` 在 aarch64-apple-ios 能编
+- `rusqlite` bundled 需要 iOS 的 C 交叉编译器（Xcode clang）
+- 阶段 0 试编时逐项确认，卡住就换栈
+
 ---
 
 ## 5. 分阶段实施计划
@@ -185,16 +216,31 @@ OpenAI-/
 
 ## 7. 构建链配置
 
-### iOS
-```
-rustup target add aarch64-apple-ios
-# 静态库产物链接进 Flutter
-```
+### 7.1 构建环境：GitHub Actions（macOS runner）
+本地是 Windows，iOS 产物必须在 macOS + Xcode 上链接，统一走 CI：
+- iOS 构建：`macos-latest` runner（`flutter build ios` + `cargo build --target aarch64-apple-ios`）
+- Android 构建（后期）：`ubuntu-latest` runner + NDK
+- Rust 静态库：`cargo build --release --target aarch64-apple-ios`，产物链接进 Flutter
+- CI 前置：`rustup target add aarch64-apple-ios`
 
-### 签名（越狱）
-- ldid 假签名：`ldid -S <binary>`
-- TrollStore 免签安装，或侧载
-- 不走上架，无证书限制
+### 7.2 ATS（App Transport Security）
+iOS 默认禁明文 HTTP，OAuth 回调是 `http://127.0.0.1`，必须在 `Info.plist` 加：
+`NSAppTransportSecurity` → `NSAllowsLocalNetworking = YES`
+
+### 7.3 账号凭证进 Keychain
+provider 的 token / refresh token 不能明文存沙盒文件，改存 iOS Keychain：
+- Rust 侧通过 FFI 暴露 `keychain_get` / `keychain_set`，由 Swift 调 Security.framework
+- 现有 `store.rs` / 各 `credentials.rs` 的落盘逻辑替换为 Keychain 读写
+
+### 7.4 Entitlements + 安装方式（越狱）
+- `com.apple.security.network.server`：允许进程内绑本地端口（OAuth 回调）
+- 安装：`ldid -S <binary>` 假签名，或 TrollStore / 侧载
+- 注意：TrollStore 对 iOS 版本有要求，不是所有越狱版本都能用，需按机型确认
+
+### 7.5 测试验证 harness
+- 复用/改造现有 `scripts/verify.mjs`（28 项协议检查）做单进程回归
+- 每家 provider 单独一个「登录 + 一条模型请求」冒烟用例
+- CI 每步跑完自动跑 harness，绿了才进下一步
 
 ---
 
@@ -234,6 +280,16 @@ rustup target add aarch64-apple-ios
 | OAuth webview + 验证码 | 1-2 周 |
 | 部署 + 后台 | 1 周 |
 | **总计** | **约 6-10 周（单人）** |
+
+---
+
+## 11. 网页端实现路径（后期）
+
+优先级最后，但方向要提前定，两条路：
+- **路 A（推荐）**：复用现有 `ui/checkin` 等 web UI + 网关本地 HTTP server，
+  核心作为服务跑，网页端走「服务端渲染 / 直连本地 API」。改动最小。
+- **路 B**：Rust 核心编译成 wasm，网页端纯前端直连（重写 UI + wasm 适配，工作量大）。
+结论：先走路 A，等 iOS / Android 稳定后再评估是否需要 wasm 版。
 
 ---
 
