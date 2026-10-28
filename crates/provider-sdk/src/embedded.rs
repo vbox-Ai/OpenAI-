@@ -16,8 +16,10 @@
 use std::sync::Arc;
 
 use agent2api_provider_protocol as proto;
+use serde_json::Value;
 
 use crate::ctx::{CallGateway, PluginCtx};
+use crate::dispatch::dispatch_control;
 use crate::provider::{BoxProvider, Provider};
 
 /// 进程内宿主：持有 provider + 运行环境 + 直连回调，供 FFI 调用。
@@ -72,6 +74,26 @@ impl EmbeddedHost {
                 }
             })
             .collect()
+    }
+
+    /// 分发一个控制面方法（一问一答），返回结果或错误消息。
+    pub async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        let provider_id = params.get("provider").and_then(Value::as_str).unwrap_or("");
+        let Some(provider) = self
+            .providers
+            .iter()
+            .find(|p| p.provider_id() == provider_id)
+            .cloned()
+        else {
+            return Err("params.provider 缺失或未知".to_string());
+        };
+        let ctx = self.ctx(&provider.provider_id());
+        let account = params
+            .get("account")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        dispatch_control(provider.as_ref(), &ctx, &account, method, params).await
     }
 
     /// 优雅停机：进程内模式直接返回，绝不 `process::exit`。

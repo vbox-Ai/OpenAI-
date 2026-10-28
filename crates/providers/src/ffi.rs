@@ -10,11 +10,13 @@ use std::sync::{Arc, OnceLock};
 
 use agent2api_provider_protocol as proto;
 use agent2api_provider_sdk::EmbeddedHost;
+use serde_json::Value;
 
 use crate::embedded::memory_gateway;
 use crate::providers;
 
 static HOST: OnceLock<Arc<EmbeddedHost>> = OnceLock::new();
+static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 
 /// 初始化进程内宿主。返回 0 = 成功，非 0 = 失败。
 ///
@@ -40,6 +42,13 @@ pub extern "C" fn agent2api_providers_init(
         debug_traffic: false,
         loopback_port,
     };
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return 3,
+    };
+    if RUNTIME.set(runtime).is_err() {
+        return 4;
+    }
     let host = EmbeddedHost::new(providers::registry(), env, memory_gateway());
     if HOST.set(host).is_err() {
         return 2; // 已初始化过
@@ -68,6 +77,46 @@ pub extern "C" fn agent2api_providers_provider_infos() -> *mut c_char {
 pub unsafe extern "C" fn agent2api_providers_string_free(s: *mut c_char) {
     if !s.is_null() {
         let _ = CString::from_raw(s);
+    }
+}
+
+/// 通用控制面调用：`method` + `params_json`(JSON) → 结果信封(JSON)。
+///
+/// 返回 `{"ok":true,"result":<value>}` 或 `{"ok":false,"error":"<msg>"}`。
+/// 调用方读完必须调 [`agent2api_providers_string_free`] 释放。
+#[no_mangle]
+pub extern "C" fn agent2api_providers_call(
+    method: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    let Some(host) = HOST.get() else {
+        return json_result_to_c(Err("宿主未初始化".to_string()));
+    };
+    let method = unsafe { cstr_to_string(method) };
+    let params_json = unsafe { cstr_to_string(params_json) };
+    let (Some(method), Some(params_json)) = (method, params_json) else {
+        return json_result_to_c(Err("参数非法（空指针）".to_string()));
+    };
+    let params: Value = match serde_json::from_str(&params_json) {
+        Ok(v) => v,
+        Err(e) => return json_result_to_c(Err(format!("params JSON 解析失败: {e}"))),
+    };
+    let Some(runtime) = RUNTIME.get() else {
+        return json_result_to_c(Err("运行时未初始化".to_string()));
+    };
+    let result = runtime.block_on(host.call(&method, params));
+    json_result_to_c(result)
+}
+
+/// 把 `Result<Value, String>` 包成 JSON 信封，再转 C 字符串。
+fn json_result_to_c(result: Result<Value, String>) -> *mut c_char {
+    let envelope = match result {
+        Ok(v) => serde_json::json!({ "ok": true, "result": v }),
+        Err(e) => serde_json::json!({ "ok": false, "error": e }),
+    };
+    match serde_json::to_string(&envelope) {
+        Ok(s) => CString::new(s).map(|c| c.into_raw()).unwrap_or(std::ptr::null_mut()),
+        Err(_) => std::ptr::null_mut(),
     }
 }
 

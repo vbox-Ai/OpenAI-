@@ -33,6 +33,7 @@
 
 mod checkin;
 pub mod ctx;
+mod dispatch;
 pub mod embedded;
 mod errors;
 pub mod images;
