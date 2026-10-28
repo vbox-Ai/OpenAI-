@@ -1,0 +1,29 @@
+name: iOS 编译检查
+
+# 阶段 0：验证 Rust 核心能否为 aarch64-apple-ios 编译。
+# 只做 cargo check（类型检查，不链接），快速暴露第一个编译障碍。
+# 完整 iOS 产物（.app/.ipa）需要 Flutter 工程，属于后续阶段。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  ios-check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 iOS 目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: 缓存 Rust 依赖
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: 编译检查（iOS arm64）
+        run: cargo check --target aarch64-apple-ios --workspace
