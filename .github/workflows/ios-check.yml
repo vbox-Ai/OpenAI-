@@ -25,5 +25,8 @@ jobs:
         with:
           workspaces: . -> target
 
+      - name: 编译检查（宿主桌面，验证 bin + lib 仍可编）
+        run: cargo check --workspace
+
       - name: 编译检查（iOS arm64）
         run: cargo check --target aarch64-apple-ios --workspace

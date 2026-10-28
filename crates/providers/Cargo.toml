@@ -12,6 +12,14 @@ homepage.workspace = true
 name = "agent2api-providers"
 path = "src/main.rs"
 
+# 库目标：供 iOS / Android 静态链接（阶段 1.1 新增）。
+# 桌面端继续用上面的 [[bin]]；移动端走这个 lib 产出 staticlib。
+# rlib 保留给本机 cargo build / test 用。
+[lib]
+name = "agent2api_providers"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
 # ── feature 设计 ────────────────────────────────────────────
 # `all` 打一个包含全部提供商的包（默认发布形态）。
 # 单家 feature 留给将来「按需出小包」用 —— 现在都还没实现，所以它们
