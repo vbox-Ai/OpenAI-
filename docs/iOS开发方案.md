@@ -20,6 +20,7 @@
 5. **仓库划分**：
    - `vbox-Ai/OpenAI-` = 原生提供商插件（主仓库，含 Flutter 端）
    - `vbox-Ai/OpenAI-web-` = 网页提供商插件（单独仓库）
+   - `vbox-Ai/OpenAI-gateway-` = 网关（host + UI + API server，MIT + 禁止商用附加声明）
 6. **构建方式**：iOS 端用 **GitHub Actions 的 macOS runner** 构建（本地是 Windows，编不了 iOS）；
    Android 端用 Linux runner + NDK；Rust 核心先 `cargo build` 出静态库再链接进 Flutter。
 7. **许可与脱商标（AGPL-3.0）**：对外分发必须保留 AGPL-3.0 并提供完整源码；
@@ -63,11 +64,12 @@ Flutter APP（单进程，装进手机）
 
 ## 2.5 网关/Host 层与单进程化的精确改造（核心盲区）
 
-### 2.5.1 网关是独立仓库，必须补上 host 层
-本仓库（`vbox-Ai/OpenAI-`）只是**插件侧**，真正的网关（host + UI）在
-另一个仓库 `aimod-cc/Agent2API`。移动端要独立成 APP，两条路：
-- 迁移 `aimod-cc/Agent2API`，参考其 host 层与 UI
-- **（推荐）自建轻量移动端 host 层**，只实现插件真正依赖的那部分
+### 2.5.1 网关是独立仓库（已迁移到 OpenAI-gateway-）
+本仓库（`vbox-Ai/OpenAI-`）只是**插件侧**，真正的网关（host + UI + API server）
+已迁移到 `vbox-Ai/OpenAI-gateway-`（源：`aimod-cc/Agent2API`）。
+- 网关 license = **MIT + 附加声明**（第 3 条：禁止商业用途、二次分发牟利、批量账号运营）；
+  **个人学习/自用 OK**，商用不行（比插件的 AGPL 更严）
+- 移动端 host 层**参考网关重建**，不是照搬桌面端（Tauri 壳要去掉）
 
 ### 2.5.2 移动端 host 层职责清单
 插件不是自包含的，它每步都回调网关（`methods::plugin` 命名空间）：
@@ -91,16 +93,33 @@ Flutter APP（单进程，装进手机）
 - 保留 `guard()` / `catch_unwind`（`main.rs` 已 deny unwrap/expect/panic）
 - 移动端必须确认**每个请求入口都包了 guard**，否则稳定性崩
 
-### 2.5.5 UI 策略
-插件自带 `ui/checkin` 页面（`pack.json` 的 `ui` 字段），桌面端由网关 iframe 托管。
-移动端二选一：
-- Flutter 重写签到中心 UI
-- webview 嵌入现有 `ui/checkin` 的 HTML/JS（改动小）
+### 2.5.5 UI 策略：Flutter 全重写
+移动端 UI 面**全部用 Flutter 重写**（不 webview 嵌入），清单来自网关 Tauri 前端：
+- 账号管理（添加账号、登录弹窗、账号行、余额/用量）
+- 签到中心（签到总览、每日签到分组）
+- 报表（请求量、成功率、Token 消耗、热力图）
+- 模型管理（模型清单、倍率、上下文、映射）
+- 设置（网关 Key、代理、并发、定时任务、跨域、局域网访问）
+- 网关面板（管理员登录、Gateway Key 管理）
 
-### 2.5.6 数据模型
-网关存 `accounts.data`（账号 + 凭证 + 额度账本）。移动端等价设计：
-- 凭证（token / refresh token）→ **iOS Keychain**
-- 账号表 / 账本 / 设置 → **SQLite**（rusqlite bundled）
+### 2.5.6 数据模型（参考网关 agent2api.db）
+网关把账号、日志、统计、配置、设置全放单个 SQLite `agent2api.db`。
+移动端等价设计：
+- 凭证（token / refresh token）→ **iOS Keychain**（网关是明文存储，移动端必须升级）
+- 账号表 / 账本 / 设置 / 统计 → **SQLite**（rusqlite bundled，参考 agent2api.db 结构）
+- 注意 WAL 模式有 `-wal` / `-shm` 附属文件，备份要一起拷
+
+### 2.5.7 移动端保留 OpenAI 兼容 API
+移动端必须保留本地 OpenAI 兼容 API（网关端口 3065）：
+- `/v1/chat/completions` / `/v1/responses` / `/v1/messages` / `/v1/models`
+- 让手机上的其他工具通过 `http://127.0.0.1:3065/v1` 接入
+- 进程内起本地 HTTP server（越狱下绑 127.0.0.1 可行）
+
+### 2.5.8 登录方式的「无桌面环境」差异
+网关 Docker 版已实测无桌面环境下的登录方式差异，移动端直接参考：
+- ✅ 可用：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证
+- ❌ 不可用：本机回调网页登录（AutoClaw / CatPaw / Accio / CodeArts / Trae）、导入本机登录态
+- 移动端优势：`flutter_inappwebview` 可**补上**本机回调登录（Docker 做不到的）
 
 ---
 
