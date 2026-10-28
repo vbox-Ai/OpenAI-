@@ -14,6 +14,7 @@
 //! 换真实现时只改一处。
 
 use std::collections::HashMap;
+use std::ffi::{c_char, c_void, CString};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +22,9 @@ use agent2api_provider_protocol as proto;
 use agent2api_provider_sdk::ctx::CallGateway;
 use agent2api_provider_sdk::{StoreAccount, StoreError};
 use serde_json::{json, Value};
+
+/// 进程内通知回调（kind, payload_json, user_data）。
+pub type NotifyCallback = unsafe extern "C" fn(*const c_char, *const c_char, *mut c_void);
 
 /// 账号 / 账本 / 设置的持久层抽象（进程内模式的存储后端）。
 pub trait AccountStore: Send + Sync {
@@ -56,11 +60,21 @@ pub trait AccountStore: Send + Sync {
 /// 进程内网关：实现 `CallGateway`，把回调直连到 [`AccountStore`]。
 pub struct EmbeddedGateway {
     store: Arc<dyn AccountStore>,
+    notify: Mutex<Option<(NotifyCallback, *mut c_void)>>,
 }
 
 impl EmbeddedGateway {
     pub fn new(store: Arc<dyn AccountStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            notify: Mutex::new(None),
+        }
+    }
+
+    /// 设置进程内通知回调（models_changed / auth_changed 经此回调到宿主）。
+    pub fn set_notify_callback(&self, cb: NotifyCallback, user_data: *mut c_void) {
+        let mut guard = self.notify.lock().unwrap_or_else(|p| p.into_inner());
+        *guard = Some((cb, user_data));
     }
 }
 
@@ -70,16 +84,17 @@ impl CallGateway for EmbeddedGateway {
         method: &'a str,
         params: Value,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<Value, StoreError>> + Send + 'a>> {
-        let store = self.store.clone();
         let method = method.to_string();
-        Box::pin(async move { route(store.as_ref(), &method, params) })
+        Box::pin(async move { self.route(&method, params) })
     }
 }
 
-/// 按方法名路由到 [`AccountStore`] 的对应操作。
-fn route(store: &dyn AccountStore, method: &str, params: Value) -> Result<Value, StoreError> {
-    use proto::methods::plugin as m;
-    match method {
+impl EmbeddedGateway {
+    /// 按方法名路由到 [`AccountStore`] 的对应操作。
+    fn route(&self, method: &str, params: Value) -> Result<Value, StoreError> {
+        let store = self.store.as_ref();
+        use proto::methods::plugin as m;
+        match method {
         m::STORE_GET => {
             let provider = str_of(&params, "provider");
             let account = str_of(&params, "account");
@@ -132,11 +147,20 @@ fn route(store: &dyn AccountStore, method: &str, params: Value) -> Result<Value,
             Ok(Value::Null)
         }
         m::NOTIFY => {
-            // 进程内模式下，通知交给宿主事件通道（Flutter 刷新 UI）。
-            // 阶段 1.2 占位：直接吞掉；1.6 接 FFI 事件通道。
+            let kind = str_of(&params, "kind");
+            let payload = params.get("payload").cloned().unwrap_or(Value::Null);
+            let cb_opt = self.notify.lock().ok().and_then(|g| *g);
+            if let Some((cb, ud)) = cb_opt {
+                let ckind = CString::new(kind).unwrap_or_default();
+                let cpayload =
+                    CString::new(serde_json::to_string(&payload).unwrap_or_default())
+                        .unwrap_or_default();
+                unsafe { cb(ckind.as_ptr(), cpayload.as_ptr(), ud) };
+            }
             Ok(Value::Null)
         }
         other => Err(StoreError::Rejected(format!("未知回调方法: {other}"))),
+        }
     }
 }
 
@@ -281,6 +305,6 @@ fn key(a: &str, b: &str) -> String {
 }
 
 /// 构造一个内存占位的进程内网关（阶段 1.2 用）。
-pub fn memory_gateway() -> Arc<dyn CallGateway> {
+pub fn memory_gateway() -> Arc<EmbeddedGateway> {
     Arc::new(EmbeddedGateway::new(Arc::new(MemoryStore::new())))
 }

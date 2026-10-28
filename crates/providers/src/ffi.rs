@@ -16,10 +16,11 @@ use agent2api_provider_sdk::serve::Cancel;
 use agent2api_provider_sdk::{EmbeddedHost, SendFuture};
 use serde_json::Value;
 
-use crate::embedded::memory_gateway;
+use crate::embedded::{memory_gateway, EmbeddedGateway, NotifyCallback};
 use crate::providers;
 
 static HOST: OnceLock<Arc<EmbeddedHost>> = OnceLock::new();
+static GATEWAY: OnceLock<Arc<EmbeddedGateway>> = OnceLock::new();
 static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
 static NEXT_CONV_ID: AtomicU64 = AtomicU64::new(1);
 static CONVERSATIONS: Mutex<HashMap<u64, Arc<Cancel>>> = Mutex::new(HashMap::new());
@@ -55,7 +56,11 @@ pub extern "C" fn agent2api_providers_init(
     if RUNTIME.set(runtime).is_err() {
         return 4;
     }
-    let host = EmbeddedHost::new(providers::registry(), env, memory_gateway());
+    let gateway = memory_gateway();
+    let host = EmbeddedHost::new(providers::registry(), env, gateway.clone());
+    if GATEWAY.set(gateway).is_err() {
+        return 5;
+    }
     if HOST.set(host).is_err() {
         return 2; // 已初始化过
     }
@@ -131,6 +136,19 @@ fn json_result_to_c(result: Result<Value, String>) -> *mut c_char {
 pub extern "C" fn agent2api_providers_shutdown() {
     if let Some(host) = HOST.get() {
         host.shutdown();
+    }
+}
+
+/// 设置进程内通知回调（models_changed / auth_changed 经此回调到宿主）。
+///
+/// `cb` 收到 `(kind, payload_json, user_data)`，二者均为借用指针，回调返回后失效。
+#[no_mangle]
+pub extern "C" fn agent2api_providers_set_notify_callback(
+    cb: Option<NotifyCallback>,
+    user_data: *mut c_void,
+) {
+    if let (Some(cb), Some(gateway)) = (cb, GATEWAY.get()) {
+        gateway.set_notify_callback(cb, user_data);
     }
 }
 

@@ -28,5 +28,12 @@ jobs:
       - name: 编译检查（宿主桌面，验证 bin + lib 仍可编）
         run: cargo check --workspace
 
-      - name: 真实构建（iOS arm64，产出静态库）
-        run: cargo build --target aarch64-apple-ios --workspace
+      - name: 真实构建（iOS arm64，release 产出静态库）
+        run: cargo build --release --target aarch64-apple-ios --workspace
+
+      - name: 上传静态库产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: libagent2api_providers-ios-arm64
+          path: target/aarch64-apple-ios/release/libagent2api_providers.a
+          if-no-files-found: error
