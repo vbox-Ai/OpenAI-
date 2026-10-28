@@ -33,6 +33,7 @@
 
 mod checkin;
 pub mod ctx;
+pub mod embedded;
 mod errors;
 pub mod images;
 mod log_context;
@@ -42,6 +43,7 @@ pub mod serve;
 
 pub use checkin::CheckinResult;
 pub use ctx::{PluginCtx, StoreAccount, StoreError, StoreProxy};
+pub use embedded::EmbeddedHost;
 pub use errors::control_error;
 pub use provider::{
     local_precondition, split_local_precondition, split_unsupported, unsupported, BoxProvider,
