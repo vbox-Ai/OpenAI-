@@ -17,6 +17,7 @@ mod crypto;
 mod dpop;
 pub mod embedded;
 mod errors;
+mod ffi;
 mod flight;
 mod headers;
 mod http;
