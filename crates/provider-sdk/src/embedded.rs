@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use crate::ctx::{CallGateway, PluginCtx};
 use crate::dispatch::dispatch_control;
-use crate::provider::{BoxProvider, Provider};
+use crate::provider::{BoxProvider, ConversationSink, Provider, SinkInner};
 
 /// 进程内宿主：持有 provider + 运行环境 + 直连回调，供 FFI 调用。
 pub struct EmbeddedHost {
@@ -94,6 +94,24 @@ impl EmbeddedHost {
             .unwrap_or("")
             .to_string();
         dispatch_control(provider.as_ref(), &ctx, &account, method, params).await
+    }
+
+    /// 流式对话：把每个 chunk 推给 `sink`（实现 [`SinkInner`]）。
+    pub async fn conversation(&self, params: Value, sink: &mut dyn SinkInner) -> Result<(), String> {
+        let provider_id = params.get("provider").and_then(Value::as_str).unwrap_or("");
+        let Some(provider) = self
+            .providers
+            .iter()
+            .find(|p| p.provider_id() == provider_id)
+            .cloned()
+        else {
+            return Err("params.provider 缺失或未知".to_string());
+        };
+        let req: proto::ConversationRequest = serde_json::from_value(params)
+            .map_err(|e| format!("conversation 参数无法解析: {e}"))?;
+        let ctx = self.ctx(&provider.provider_id());
+        let view = ConversationSink::new(sink);
+        provider.conversation(&ctx, req, view).await
     }
 
     /// 优雅停机：进程内模式直接返回，绝不 `process::exit`。

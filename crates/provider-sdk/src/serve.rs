@@ -105,7 +105,8 @@ impl Cancel {
         self.flag.load(Ordering::Acquire)
     }
 
-    fn cancel(&self) {
+    /// 触发取消（进程内模式由 FFI `conversation_cancel` 调用）。
+    pub fn cancel(&self) {
         self.flag.store(true, Ordering::Release);
         self.notify.notify_waiters();
     }
