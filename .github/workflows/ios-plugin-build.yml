@@ -1,0 +1,48 @@
+name: iOS 插件可执行文件编译
+
+# 越狱 / TrollStore 路线的第一步：把 agent2api-providers（21 家 provider 的
+# 单一插件进程）交叉编译成 aarch64-apple-ios 可执行文件（Mach-O executable）。
+#
+# 普通 iOS 不能 spawn 子进程，但 TrollStore 安装的 App 被 platformized 后可
+# 正常 posix_spawn；iOS 17.0 是 TrollStore 2 的黄金版本。网关侧的
+# `plugin_host` 用 tokio::process::Command 拉起这个 exe，stdio 通信。
+#
+# 触发：手动（workflow_dispatch）。产物：Mach-O executable（arm64）。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios-exe:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust（含 iOS 目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: 编译插件为 iOS 可执行文件
+        run: cargo build --release --target aarch64-apple-ios --bin agent2api-providers
+
+      - name: 校验产物形态（须为 arm64 Mach-O executable）
+        run: |
+          EXE=target/aarch64-apple-ios/release/agent2api-providers
+          ls -lh "$EXE"
+          file "$EXE"
+          # 期望输出含 "Mach-O 64-bit executable arm64"
+          file "$EXE" | grep -q "Mach-O 64-bit executable arm64" || {
+            echo "::error::产物不是 arm64 Mach-O executable"
+            exit 1
+          }
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent2api-providers-ios
+          path: target/aarch64-apple-ios/release/agent2api-providers
+          if-no-files-found: error
