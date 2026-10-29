@@ -1,0 +1,590 @@
+# Agent2API iOS 端开发方案
+
+> 目标：把 Agent2API 的网关 + 提供商插件体系，以 Flutter APP 形态独立运行在越狱 iPhone 上，后期可平滑扩展 Android。
+> 基线源码：`ProvidersPlugin/Agent2Providers`（已迁移至 `vbox-Ai/OpenAI-`）。
+> 网页插件：`ProvidersPlugin/Agent2WebProviders`（已迁移至 `vbox-Ai/OpenAI-web-`）。
+
+---
+
+## 0. 开发边界要求（约定，必须遵守）
+
+1. **开发优先级**：Flutter iOS 端优先 → 后期逐步 Android → 最后实现网页端。
+2. **Flutter 端独立目录**：Flutter 项目在仓库内**新建独立目录**（如 `flutter-app/`），
+   **不修改、不影响原有项目任何代码**。源项目（Rust 侧）日后更新/同步到仓库时，
+   不会因为更新了源项目而改变 Flutter 这边的项目。
+3. **记忆点机制**：每个步骤开发完毕后，必须**补充一份「记忆点」**（该步骤做了什么、
+   关键决策、遗留问题、下一步入口），确认后再继续下一个步骤开发。
+4. **分支策略**：
+   - `main` = 最新代码（`3.3.0-beta.4` 基线），后续所有开发以此为准
+   - `legacy-0.2.1` = 旧的 0.2.1 版本，仅存档，不再开发
+5. **仓库划分**：
+   - `vbox-Ai/OpenAI-` = 原生提供商插件（主仓库，含 Flutter 端）
+   - `vbox-Ai/OpenAI-web-` = 网页提供商插件（单独仓库）
+   - `vbox-Ai/OpenAI-gateway-` = 网关（host + UI + API server，MIT + 禁止商用附加声明）
+6. **构建方式**：iOS 端用 **GitHub Actions 的 macOS runner** 构建（本地是 Windows，编不了 iOS）；
+   Android 端用 Linux runner + NDK；Rust 核心先 `cargo build` 出静态库再链接进 Flutter。
+7. **许可与脱商标（AGPL-3.0）**：对外分发必须保留 AGPL-3.0 并提供完整源码；
+   项目名、logo、签名 `keyId`（原 `official-2026`）等一律改名，避免商标与来源混淆。
+
+---
+
+## 1. 背景与目标
+
+### 1.1 现状
+- 网关是 Tauri 桌面应用（本地 server + webview 壳 + 系统托盘）
+- 插件是「独立子进程」模型：网关 `spawn` 插件，走 stdin/stdout JSON 行协议
+- 五平台矩阵：win x64 / mac x64 / mac arm64 / linux x64 / linux arm64，**无 iOS**
+
+### 1.2 目标
+- 手机上独立运行，不依赖电脑
+- Flutter 做 UI 壳（iOS 先上，Android 后上）
+- Rust 核心内嵌进 APP（FFI），单进程，规避 iOS 禁止 spawn 子进程的限制
+
+---
+
+## 2. 总体架构
+
+```
+Flutter APP（单进程，装进手机）
+│
+├── Flutter UI（Dart）
+│     账号管理 / 余额 / 签到 / 模型选择 / 设置
+│
+├── FFI 桥接层（flutter_rust_bridge 或手写 dart:ffi）
+│     Dart ⇄ Rust 函数调用
+│
+└── Rust 核心（编译成静态库，链接进 APP）
+      ├── 网关逻辑（从 Tauri 剥离出来的纯逻辑）
+      └── 29 家 provider（全部静态编译进同一二进制）
+```
+
+**关键决策**：单进程。所有 provider 不再作为独立进程 spawn，而是编译进 APP 主进程直接函数调用。
+
+---
+
+## 2.5 网关/Host 层与单进程化的精确改造（核心盲区）
+
+### 2.5.1 网关是独立仓库（已迁移到 OpenAI-gateway-）
+本仓库（`vbox-Ai/OpenAI-`）只是**插件侧**，真正的网关（host + UI + API server）
+已迁移到 `vbox-Ai/OpenAI-gateway-`（源：`aimod-cc/Agent2API`）。
+- 网关 license = **MIT + 附加声明**（第 3 条：禁止商业用途、二次分发牟利、批量账号运营）；
+  **个人学习/自用 OK**，商用不行（比插件的 AGPL 更严）
+- 移动端 host 层**参考网关重建**，不是照搬桌面端（Tauri 壳要去掉）
+
+### 2.5.2 移动端 host 层职责清单
+插件不是自包含的，它每步都回调网关（`methods::plugin` 命名空间）：
+- 账号存储：`store.get` / `store.list` / `store.update` / `store.mark_limited`
+- 额度账本：`store.ledger_get` / `store.ledger_put`
+- 设置：`settings.get` / `settings.set`
+- 握手：提供 `HostEnv`（data_dir / host_version / target / proxy / debug_traffic / loopback_port）
+- UI 渲染：收集 `ProviderInfo`（capabilities / account_features / admin_panels / checkin）
+
+### 2.5.3 单进程化精确改造清单
+| 现有代码 | 移动端改法 |
+|---|---|
+| `serve.rs` 的 stdin/stdout 帧循环 | 进程内 channel / 直接函数调用 |
+| `CallGateway::call`（8 个回调） | 直连移动端存储层（Keychain / SQLite） |
+| `SHUTDOWN` 的 `std::process::exit(0)` | 改优雅返回（否则杀掉整个 APP） |
+| `HostEnv` init 握手 | 直接构造：target=`aarch64-apple-ios`，loopback_port 给 OAuth |
+| `ProviderInfo` 握手 | 保留为进程内 init 查询，Flutter UI 渲染依赖它 |
+
+### 2.5.4 崩溃隔离（单进程下更关键）
+原架构靠「子进程崩溃只带走自己」；单进程后一个 panic 可能带走整个 APP。
+- 保留 `guard()` / `catch_unwind`（`main.rs` 已 deny unwrap/expect/panic）
+- 移动端必须确认**每个请求入口都包了 guard**，否则稳定性崩
+
+### 2.5.5 UI 策略：复用网关 Web UI（webview），不重写
+
+网关是 Tauri 2 应用，其 UI 本身就是 **Web 前端**（HTML/JS/CSS，通过 HTTP 调本地
+Rust server）。移动端**直接复用这套 Web UI**，用 webview 加载，**不 Flutter 重写**。
+
+- UI 层：`flutter_inappwebview` 加载网关 Web UI（HTML/JS/CSS 原样搬）
+- 功能 100% 保留：账号管理、签到中心、报表、模型管理、设置、网关面板
+- 唯一新写：**本地 HTTP 桥 server**（复用网关 server 逻辑，底层从 spawn 插件
+  改成 FFI 调 `EmbeddedHost`），见 §14
+
+两条路对比结论：
+
+| 维度 | 复用 Web UI（✅ 采用） | Flutter 全重写 |
+|---|---|---|
+| UI 开发量 | ≈ 零 | 全部重写 |
+| 功能完整性 | 100% | 易漏 |
+| 出 ipa 速度 | 几天 | 数周 |
+| 手感 | 略逊（webview） | 原生最优 |
+
+结论：先复用 Web UI 快速出 ipa；后期只对高频页面（如对话页）单独 Flutter 原生化。
+
+### 2.5.6 数据模型（参考网关 agent2api.db）
+网关把账号、日志、统计、配置、设置全放单个 SQLite `agent2api.db`。
+移动端等价设计：
+- 凭证（token / refresh token）→ **iOS Keychain**（网关是明文存储，移动端必须升级）
+- 账号表 / 账本 / 设置 / 统计 → **SQLite**（rusqlite bundled，参考 agent2api.db 结构）
+- 注意 WAL 模式有 `-wal` / `-shm` 附属文件，备份要一起拷
+
+### 2.5.7 移动端保留 OpenAI 兼容 API
+移动端必须保留本地 OpenAI 兼容 API（网关端口 3065）：
+- `/v1/chat/completions` / `/v1/responses` / `/v1/messages` / `/v1/models`
+- 让手机上的其他工具通过 `http://127.0.0.1:3065/v1` 接入
+- 进程内起本地 HTTP server（越狱下绑 127.0.0.1 可行）
+
+### 2.5.8 登录方式的「无桌面环境」差异
+网关 Docker 版已实测无桌面环境下的登录方式差异，移动端直接参考：
+- ✅ 可用：网页登录（WorkBuddy / Qoder / Cline）、手机验证码、粘贴凭证
+- ❌ 不可用：本机回调网页登录（AutoClaw / CatPaw / Accio / CodeArts / Trae）、导入本机登录态
+- 移动端优势：`flutter_inappwebview` 可**补上**本机回调登录（Docker 做不到的）
+
+---
+
+## 2.6 移动端特有功能项（补充）
+
+### 2.6.1 代理支持
+`HostEnv.proxy` 是插件出网的代理入口，很多 provider 的上游需要代理才能访问。
+- 移动端要接**系统代理 / 手动代理 / Clash 类工具**的配置
+- 参考现有 `proxy_util.rs` / `proxy.rs`，把代理地址写进 `HostEnv`
+
+### 2.6.2 后台定时签到
+签到是核心功能，桌面端靠定时任务触发（`ui/checkin/schedule.js`）。
+移动端后台定时方案：
+- 越狱：`launchd` 定时拉起签到，或 APP 内 `BGTaskScheduler`
+- 非越狱：依赖前台手动签到（iOS 后台限制）
+
+### 2.6.3 移动端更新机制（不走商店）
+越狱侧载不走上架，更新要自建：
+- 自建更新源（GitHub Releases），APP 内检查新版本并下载安装
+- 或复用桌面端 `plugin_host::update` 的资产匹配逻辑（`<id>-<version>-<target>.zip`）
+
+### 2.6.4 账号导入/迁移（可选）
+桌面端已有账号（`accounts.data`）搬到手机：提供**导出/导入**功能，
+凭证经 Keychain 落库，避免逐家重新登录。
+
+### 2.6.5 日志与崩溃上报
+移动端排障需要：本地日志落盘 + 崩溃堆栈捕获（`catch_unwind` 时记录），
+可选接 Crashlytics 或自建上报。
+
+---
+
+## 3. 技术选型
+
+| 层 | 选型 | 理由 |
+|---|---|---|
+| UI | Flutter | 一套代码 iOS/Android 通吃 |
+| FFI | flutter_rust_bridge（首选）/ dart:ffi（兜底） | 自动生成绑定，减少手写胶水 |
+| Rust 核心 | 现有代码改造为静态库（cdylib/staticlib） | 逻辑复用 |
+| iOS 目标 | aarch64-apple-ios | Rust std 支持 |
+| 内嵌浏览器 | flutter_inappwebview | OAuth 回调 + ZCode 验证码 |
+| 本地存储 | 沿用现有 JSON/SQLite（rusqlite bundled） | 改路径即可 |
+| 部署 | TrollStore / ldid 假签名 / 侧载 | 越狱机不走上架 |
+
+---
+
+## 4. 核心改造点（按依赖顺序）
+
+### 4.1 单进程化（最关键）
+- 把「网关 spawn 插件」改为「网关直接调用 provider trait」
+- `crates/provider-sdk/src/serve.rs` 的 serve 主循环抽出来，作为进程内入口函数供 FFI 调用
+- 移除 `std::process::Command` 的 spawn 路径
+
+### 4.2 剥离 Tauri 依赖
+- 网关逻辑从 `desktop-tauri/src-tauri/server` 抽成纯 Rust 库 crate
+- 删掉系统托盘、桌面窗口、Tauri IPC
+- 网关对外仍保留本地 HTTP 端点（供 APP 内 Flutter 调用）
+
+### 4.3 FFI 桥接
+- 定义边界 API：`init` / `login(provider)` / `chat(model)` / `balance` / `checkin`
+- 用 flutter_rust_bridge 从 Rust 导出函数给 Dart
+- 异步用 tokio + Dart 的 async/await 对接
+
+### 4.4 路径适配
+- `AppData`、`%APPDATA%`、`home_dir`、`temp_dir` → iOS 沙盒 Documents / tmp
+- 设备标识存储（UMID、device id 等）统一落到 APP 沙盒目录
+
+### 4.5 Windows 专属代码处理
+| 位置 | 处理 |
+|---|---|
+| `zcode/activation.rs` tzutil/reg | 已有 `#[cfg(not(windows))]` 降级，免改 |
+| `zcode/plan.rs` / `claim.rs` platform 字符串 | 已有 else 默认分支，可伪装 |
+| `crypto.rs` DPAPI | 非 Windows 是报错桩，砍掉「导入桌面凭证」功能即可 |
+
+### 4.6 OAuth 回调 webview
+- 6 家 provider 有 loopback 回调（Antigravity / Accio / Trae / AutoClaw / CodeArts / LobsterAI）
+- 用 flutter_inappwebview 打开授权 URL，webview 跳回 `127.0.0.1:<port>` 回调
+- Rust 侧在进程内绑本地端口（iOS 越狱下可行）
+
+### 4.7 ZCode 验证码（无痕验证）
+三条路，按优先级：
+1. **路 C**：编码套餐通道不需要验证码，先让 ZCode 核心可用（零额外工作）
+2. **路 A**：flutter_inappwebview 跑同一份 `aliyun-captcha.js`，静默铸令牌（等价替换 Tauri webview）
+3. **路 B**：Rust 内嵌 JS/DOM 引擎（rquickjs + DOM 模拟层），headless 也能铸
+
+### 4.8 Qoder UMID 风控组件
+- `qoder/risk.rs` spawn 桌面二进制 `runtime-info`
+- iOS 上 spawn 不可行、架构不匹配
+- **决策**：砍掉「国际版每日领 100 Credits」活动；核心（模型调用/登录/签到）不受影响
+- 进阶：逆向 runtime-info 用纯 Rust 重写（工作量大，暂缓）
+
+### 4.9 协议契约（provider-protocol）处理
+单进程后，stdin/stdout JSON 分帧协议失去意义，两种走法：
+- **走法 A（推荐）**：废弃分帧协议，provider 改成进程内直接函数调用；
+  `provider-protocol` 的 Request/Response/Frame 等类型保留复用为内部 API。
+- **走法 B**：保留协议层，FFI 仍按 JSON 序列化过线（多余开销，不推荐）。
+选走法 A：删掉 `frame`/`serve` 的 stdio 循环，保留类型定义。
+
+### 4.10 tokio 运行时与 Flutter 生命周期桥接
+- Rust 核心在 FFI 侧起一个 **tokio 多线程 runtime**（`tokio::runtime::Builder`）
+- flutter_rust_bridge 的 async 函数映射到 tokio future
+- APP 退出/进后台时显式 `runtime.shutdown_timeout()` 优雅停机
+- 禁止在 Dart 主 isolate 上跑阻塞 Rust 调用，统一走异步通道
+
+### 4.11 flutter-app 如何引用 Rust 代码
+三种方式，选一种写死在约定里：
+- **方式 A（推荐）**：`flutter-app/` 用相对路径引用 `../crates/`（只读引用，
+  不改源项目代码，满足「独立目录」边界）
+- 方式 B：把需要的 Rust 代码 vendor 进 `flutter-app/rust_core/`（完全隔离，但要维护副本）
+- 方式 C：git submodule（增加管理复杂度，不推荐）
+结论：走方式 A + `Cargo.toml` 的 path 依赖，源项目更新只影响 Rust 侧，Flutter 壳不动。
+
+### 4.12 TLS 依赖栈的 iOS 兼容（阶段 0 重点验证）
+- HTTP 客户端若用 `reqwest`：默认 TLS 走 native-tls（iOS 上依赖 Security.framework，可用）
+- 若走 rustls：确认 `ring`/`aws-lc` 在 aarch64-apple-ios 能编
+- `rusqlite` bundled 需要 iOS 的 C 交叉编译器（Xcode clang）
+- 阶段 0 试编时逐项确认，卡住就换栈
+
+---
+
+## 5. 分阶段实施计划
+
+### 阶段 0：验证编译（1-2 天）
+- `rustup target add aarch64-apple-ios`
+- 把 `crates/providers` 编成 iOS 静态库，确认 Rust 层能过编译
+- 卡点即第一个坑，先暴露
+
+### 阶段 1：单进程化 + 剥 Tauri（1-2 周）
+- 抽网关纯逻辑库
+- provider trait 改进程内调用
+- 编译通过、本地单进程能跑通 init + 一家 provider
+
+### 阶段 2：FFI 桥接 + 最小 Flutter 壳（1-2 周）
+- flutter_rust_bridge 打通 Dart⇄Rust
+- 最小 UI：登录一家 provider + 发一条模型请求
+
+### 阶段 3：路径适配 + 全量 provider 移植（1-2 周）
+- 路径全部迁到沙盒
+- 逐家 provider 过一遍，确认核心可用
+
+### 阶段 4：OAuth webview + ZCode 验证码（1-2 周）
+- flutter_inappwebview 接入
+- ZCode 走路 C（先）→ 路 A（后）
+
+### 阶段 5：部署 + 后台（1 周）
+- ldid 假签名 / TrollStore 安装
+- 后台：越狱 launchd 常驻，或容忍 iOS 挂起（见 §8）
+
+### 阶段 6：Android 扩展（后期）
+- 加 `aarch64-linux-android` 等 Rust target + NDK
+- Flutter UI 零改动，只补 FFI 构建配置
+
+---
+
+## 6. 目录结构规划（迁移后仓库）
+
+**核心原则：Flutter 端在独立目录，与源项目代码完全隔离，互不影响。**
+
+```
+OpenAI-/
+├── crates/              # 原有 Rust 源码（源项目，保持不动）
+│   ├── providers/
+│   ├── provider-protocol/
+│   └── provider-sdk/
+├── scripts/             # 原有构建脚本（保持不动）
+├── ui/                  # 原有桌面端 UI（保持不动）
+├── pack.json            # 原有插件清单（保持不动）
+│
+├── flutter-app/         # ← 新增：Flutter 端（独立目录，不影响上面任何代码）
+│   ├── lib/             # Dart UI
+│   ├── ios/             # iOS 工程
+│   ├── android/         # Android 工程（后期）
+│   └── rust_bridge/     # flutter_rust_bridge 绑定
+│
+├── docs/                # ← 新增：文档与记忆点
+│   ├── iOS开发方案.md
+│   └── memory/          # 每个步骤的「记忆点」
+└── README.md            # 原有 README（保持不动）
+```
+
+> 源项目更新同步时，只动 `crates/ scripts/ ui/ pack.json` 这些原有部分；
+> `flutter-app/` 与 `docs/` 是独立新增目录，永远不受源项目更新影响。
+
+---
+
+## 7. 构建链配置
+
+### 7.1 构建环境：GitHub Actions（macOS runner）
+本地是 Windows，iOS 产物必须在 macOS + Xcode 上链接，统一走 CI：
+- iOS 构建：`macos-latest` runner（`flutter build ios` + `cargo build --target aarch64-apple-ios`）
+- Android 构建（后期）：`ubuntu-latest` runner + NDK
+- Rust 静态库：`cargo build --release --target aarch64-apple-ios`，产物链接进 Flutter
+- CI 前置：`rustup target add aarch64-apple-ios`
+
+### 7.2 ATS（App Transport Security）
+iOS 默认禁明文 HTTP，OAuth 回调是 `http://127.0.0.1`，必须在 `Info.plist` 加：
+`NSAppTransportSecurity` → `NSAllowsLocalNetworking = YES`
+
+### 7.3 账号凭证进 Keychain
+provider 的 token / refresh token 不能明文存沙盒文件，改存 iOS Keychain：
+- Rust 侧通过 FFI 暴露 `keychain_get` / `keychain_set`，由 Swift 调 Security.framework
+- 现有 `store.rs` / 各 `credentials.rs` 的落盘逻辑替换为 Keychain 读写
+
+### 7.4 Entitlements + 安装方式（越狱）
+- `com.apple.security.network.server`：允许进程内绑本地端口（OAuth 回调）
+- 安装：`ldid -S <binary>` 假签名，或 TrollStore / 侧载
+- 注意：TrollStore 对 iOS 版本有要求，不是所有越狱版本都能用，需按机型确认
+
+### 7.5 测试验证 harness
+- 复用/改造现有 `scripts/verify.mjs`（28 项协议检查）做单进程回归
+- 每家 provider 单独一个「登录 + 一条模型请求」冒烟用例
+- CI 每步跑完自动跑 harness，绿了才进下一步
+
+---
+
+## 8. 后台运行方案
+
+越狱机有两种选择：
+
+| 方案 | 说明 | 适用 |
+|---|---|---|
+| launchd 常驻 daemon | 核心跑成系统守护进程，APP 只是前端 | 最稳，需越狱 |
+| APP 内运行 + 容忍挂起 | 常规 APP，后台可能被 iOS 挂起 | 简单，但重活可能断 |
+
+推荐：**核心逻辑做成 launchd daemon，Flutter APP 通过本地 HTTP 连 daemon**。这样既保留 GUI，又不怕后台被杀。
+
+---
+
+## 9. 风险与对策
+
+| 风险 | 对策 |
+|---|---|
+| 上游 provider 环境检测拒手机请求 | 逐家实测，设备标识伪装成桌面值 |
+| ZCode 验证码风控限速 | 按「库存低才补」节奏铸令牌，勿猛铸 |
+| Qoder 国际版领积分不可用 | 接受，核心功能不受影响 |
+| 部分 provider 上游 API 变更 | 保持 upstream 同步，定期 rebase |
+| 单进程失去崩溃隔离 | 用 catch_unwind 在请求边界兜住（现有代码已有 guard） |
+
+---
+
+## 10. 工作量估算
+
+| 阶段 | 估算 |
+|---|---|
+| 验证编译 | 1-2 天 |
+| 单进程化 + 剥 Tauri | 1-2 周 |
+| FFI + 最小壳 | 1-2 周 |
+| 路径 + 全量 provider | 1-2 周 |
+| OAuth webview + 验证码 | 1-2 周 |
+| 部署 + 后台 | 1 周 |
+| **总计** | **约 6-10 周（单人）** |
+
+---
+
+## 11. 网页端实现路径（后期）
+
+优先级最后，但方向要提前定，两条路：
+- **路 A（推荐）**：复用现有 `ui/checkin` 等 web UI + 网关本地 HTTP server，
+  核心作为服务跑，网页端走「服务端渲染 / 直连本地 API」。改动最小。
+- **路 B**：Rust 核心编译成 wasm，网页端纯前端直连（重写 UI + wasm 适配，工作量大）。
+结论：先走路 A，等 iOS / Android 稳定后再评估是否需要 wasm 版。
+
+---
+
+## 附录：provider 逐家适配清单
+
+| Provider | iOS 判定 | 需要的处理 |
+|---|---|---|
+| ZCode | 🟡 核心可用 | 验证码走编码通道/路 A；platform 字符串伪装 |
+| Qoder | 🟢 核心可用 | 砍 UMID 组件（国际版领积分废） |
+| AutoClaw | 🟡 改路径 | AppData→沙盒；DPAPI 导入废 |
+| OrcaTerm | 🟡 改路径 | Tauri store 明文路径 |
+| Antigravity / Accio / Trae / CodeArts / LobsterAI | 🟡 换 webview | loopback 回调换 flutter_inappwebview |
+| 其余（ModelScope、Cline、Kuku、MonkeyCode、OfficeAce、WorkBuddy 等） | 🟢 大概率能跑 | 改路径即可 |
+
+---
+
+## 12. 已知遗留（阶段 1 完成后待办）
+
+阶段 1（单进程化 + 剥 Tauri + FFI 骨架）已完成，以下 5 项是**已知遗留**，按严重度排序，均已在分阶段计划中，不是遗漏。
+
+### 12.1 流式对话（conversation）未接 FFI —— 🔴 阶段 2 前必须补
+
+`handle_conversation`（流式多帧）仍是 stdio 专有，未暴露给 FFI。`chat`（一问一答）能调，但流式输出拿不到。
+
+- **影响**：iOS 模型对话（流式输出）不可用
+- **方案**：FFI 回调机制（chunk 回调函数指针），见 §13 流式 FFI 回调设计
+- **计划**：阶段 2
+
+### 12.2 notify 回调被吞 —— 🟠
+
+`EmbeddedGateway` 里 `notify`（models_changed / auth_changed）→ 直接 `Ok(Null)`。
+
+- **影响**：账号 / 模型列表变化，Flutter UI 不自动刷新
+- **方案**：FFI 事件通道（Rust → Dart 回调）
+- **计划**：阶段 2 / 3
+
+### 12.3 store.update 的 public 字段未计算 —— 🟠
+
+stdio 模式 serve.rs 的 `CallHandle` 调 `adapter.account_view(&secret)` 算 public；embedded 模式 `EmbeddedGateway` 解耦拿不到 provider 实现，public 为空。
+
+- **影响**：账号列表 public 视图为空（UI 显示不了邮箱 / 昵称）
+- **缓解**：Flutter 层调 `account.view`（已暴露）现算
+- **计划**：阶段 2 / 3
+
+### 12.4 MemoryStore 是占位 —— 🟡
+
+真实持久层尚未实现，3 个 TODO：
+
+- 不落盘（重启即丢）
+- `mark_limited` 空实现（账号冷却 / 轮换失效）
+- `update` 按 id 全局找（未按 provider 分组）
+
+- **方案**：SQLite（账号 / 账本 / 设置）+ Keychain（凭证）
+- **计划**：阶段 3
+
+### 12.5 崩溃隔离未验证 —— 🟡
+
+单进程后，`guard()` / `catch_unwind` 对 29 家 provider 请求入口的覆盖率未实测。
+
+- **方案**：请求入口全覆盖 guard + 真机验证
+- **计划**：阶段 3 全量 provider 移植时验证
+
+---
+
+## 13. 流式 conversation 的 FFI 回调设计
+
+### 13.1 背景
+
+stdio 模式里，`handle_conversation` 用 `StreamSink`（实现 `SinkInner`）把每个 chunk 写 stdout。移动端没有 stdout，需要把 `SinkInner` 换成「回调 Dart 侧」的实现 —— 这是 §12.1 的核心补法。
+
+关键链路（SDK `provider.rs`）：
+
+```text
+Provider::conversation(ctx, req, sink)
+        └─ sink.head(head)   → SinkInner::send_head
+        └─ sink.send(bytes)  → SinkInner::send_chunk
+```
+
+只要写一个 `FfiSink: SinkInner`，把 `send_head` / `send_chunk` 改成调 C 回调，provider 代码一行不用动。
+
+### 13.2 C ABI 回调定义（长度前缀，防 NUL 字节）
+
+```c
+// chunk 是 OpenAI chat SSE 文本，但为防内嵌 NUL，用长度前缀而非 C 字符串
+typedef void (*ConversationChunkCallback)(
+    const uint8_t* data,   // 借用指针，回调返回后失效
+    size_t         len,
+    void*          user_data
+);
+
+typedef void (*ConversationDoneCallback)(
+    int32_t  ok,            // 1=正常结束, 0=出错
+    const char* error_json, // 出错时的消息（可空）
+    void*  user_data
+);
+```
+
+### 13.3 FfiSink（SDK 内实现）
+
+```rust
+struct FfiSink {
+    on_head: ConversationChunkCallback,
+    on_chunk: ConversationChunkCallback,
+    on_done: ConversationDoneCallback,
+    user_data: *mut c_void,
+}
+
+impl SinkInner for FfiSink {
+    fn send_head(&mut self, head: proto::StreamHead) -> SendFuture<()> {
+        // head → serde_json 序列化 → 字节 → on_head(ptr, len, user_data)
+        // 调用后立即释放中间缓冲
+    }
+    fn send_chunk(&mut self, bytes: &[u8]) -> SendFuture<()> {
+        // 原样转发：on_chunk(bytes.as_ptr(), bytes.len(), user_data)
+    }
+}
+```
+
+### 13.4 FFI 入口（providers 的 ffi.rs）
+
+```c
+// 发起流式对话，返回会话 id（0 = 失败）
+uint64_t agent2api_providers_conversation_start(
+    const char* params_json,          // proto::ConversationRequest 的 JSON
+    ConversationChunkCallback on_head,
+    ConversationChunkCallback on_chunk,
+    ConversationDoneCallback  on_done,
+    void* user_data
+);
+
+// 取消会话（Dart 侧 dispose 时调）
+void agent2api_providers_conversation_cancel(uint64_t id);
+```
+
+流程：
+
+1. `conversation_start` **同步**：解析 params → 找 provider → 构造 ctx → `runtime.spawn(conversation 任务)` → 返回 id
+2. 任务里 `provider.conversation(ctx, req, sink)` 跑起来，每个 chunk 经 `FfiSink` 回调 Dart
+3. 任务结束（Ok 或 Err）时回调 `on_done`
+
+### 13.5 线程模型与生命周期（关键约束）
+
+| 约束 | 说明 |
+|---|---|
+| 回调线程 | chunk 在 tokio worker 线程回调 Dart，**不是** Dart 主 isolate |
+| 回调不许阻塞 | 回调里只做「塞进 StreamController」，重活会卡死 tokio worker |
+| isolate 存活 | Dart 用 `NativeCallable.listener` + `keepIsolateAlive`，防回调期间 isolate 被回收 |
+| user_data 生命周期 | Dart 持有，会话结束（on_done 之后）才能释放 |
+| 背压 | 回调是 fire-and-forget，天然无背压；移动端内存足够，Dart 侧自行缓冲即可 |
+
+### 13.6 会话状态表
+
+```rust
+// providers/ffi.rs 内
+static CONVERSATIONS: Mutex<HashMap<u64, Cancel>> = ...;
+```
+
+- `conversation_start` 时插入，`on_done` / `cancel` 时移除
+- `conversation_cancel(id)` 触发 `Cancel`（复用 SDK 已有的取消机制，与 stdio 的 `abort` 同一套）
+
+### 13.7 实现位置与顺序
+
+1. SDK：`FfiSink`（实现 `SinkInner`）—— 因为 `SinkInner` 是 SDK 内部 trait
+2. providers：`ffi.rs` 加 `conversation_start` / `conversation_cancel` + 会话表
+3. SDK：`EmbeddedHost` 加 `conversation(...)` 方法（复用 `handle_conversation` 的 provider 查找 + ctx 构造，但 sink 换成 `FfiSink`）
+4. Dart：`NativeCallable` 包装 + StreamController 收 chunk
+
+---
+
+## 14. 本地 HTTP 桥 server（复用 Web UI 的关键块）
+
+复用网关 Web UI 的前提：Web UI 的 HTTP 请求要有地方接。移动端没有网关进程，
+所以要在 Rust 核心里起一个**本地 HTTP server**，承担三件事（一个 server 全包）：
+
+```text
+Web UI（webview 加载）──HTTP──→ 本地 HTTP server（127.0.0.1:3065）
+                                  ├─ GET  /            → 静态 HTML（Web UI）
+                                  ├─ GET  /assets/*    → 静态 JS/CSS
+                                  ├─ POST /api/*       → Web UI 自己的 API → FFI
+                                  └─ /v1/*             → OpenAI 兼容 API → FFI（§2.5.7）
+```
+
+### 14.1 实现要点
+
+- HTTP 框架：`axum`（轻量、tokio 原生）
+- 静态文件：网关 Web UI 打进二进制（`include_dir!`）或放沙盒 assets
+- API 路由：Web UI 每个端点 → 对应 FFI 方法（`EmbeddedHost::call` / `conversation`）
+- 复用：网关 server 的路由表在 `OpenAI-gateway-` 仓库里有现成实现，直接搬，底层从
+  spawn 插件改成 FFI
+
+### 14.2 顺序
+
+1. 从 `OpenAI-gateway-` 抄 Web UI 静态文件 → `flutter-app/assets/`
+2. Rust 起本地 HTTP server，先 serve 静态文件（解决 webview 白屏）
+3. 把网关 API 路由表搬到 server，底层接 FFI
+4. webview 指向 `127.0.0.1:3065`，功能全通
