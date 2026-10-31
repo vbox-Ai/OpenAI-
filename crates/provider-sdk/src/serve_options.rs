@@ -1,11 +1,25 @@
 use agent2api_provider_protocol as proto;
+use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::provider::BoxProvider;
 
-#[derive(Clone, Copy, Default)]
+/// 可替换的读端（默认 stdin，进程内模式时换成内存管道读端）。
+pub type InjectedReader = Box<dyn AsyncRead + Unpin + Send>;
+/// 可替换的写端（默认 stdout，进程内模式时换成内存管道写端）。
+pub type InjectedWriter = Box<dyn AsyncWrite + Unpin + Send>;
+
+#[derive(Default)]
 pub struct ServeOptions {
     /// 在握手应答前初始化机器级资源；失败时拒绝握手。
     pub on_init: Option<fn(&proto::HostEnv) -> std::io::Result<()>>,
+    /// 读端：`None` 时用 `tokio::io::stdin()`（独立进程的默认形态）。
+    /// 进程内嵌入时注入内存管道读端，从而**不 spawn 子进程**也能跑同一套主循环。
+    pub reader: Option<InjectedReader>,
+    /// 写端：`None` 时用 `tokio::io::stdout()`。
+    pub writer: Option<InjectedWriter>,
+    /// 进程内模式：`shutdown` 时不调用 `std::process::exit`（会杀死宿主 App），
+    /// 只正常返回。独立进程模式保持 `true`（exit 让网关感知子进程退出）。
+    pub in_process: bool,
 }
 
 pub fn serve_blocking(providers: Vec<BoxProvider>) {

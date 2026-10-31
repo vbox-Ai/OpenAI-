@@ -1,0 +1,28 @@
+name: ci-check
+
+# POC 编译验证：推送即跑 cargo check，验证 lib（进程内嵌入）+ workbuddy 形态能编译。
+# 这是 iOS 进程内运行方案的编译闸门 —— 桌面端发版仍走 build.yml 的 tag 派发。
+
+on:
+  push:
+    branches:
+      - '**'
+  workflow_dispatch:
+
+jobs:
+  check-lib-workbuddy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: cargo check（lib 形态，仅 workbuddy，无 bin）
+        run: |
+          cargo check --no-default-features --features workbuddy \
+            -p agent2api-providers
+
+      - name: cargo check（默认 all + bin，确认没破坏独立进程形态）
+        run: |
+          cargo check -p agent2api-providers

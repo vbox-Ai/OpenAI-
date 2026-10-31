@@ -8,9 +8,18 @@ license-file.workspace = true
 repository.workspace = true
 homepage.workspace = true
 
+# ── crate-type ──────────────────────────────────────────────
+# 同时产出可执行文件（spawn 形态，桌面端用）与静态库（进程内嵌入形态，
+# iOS 用 —— 沙箱禁止 spawn 子进程，把 provider 实现链进主二进制直接调）。
+[lib]
+name = "agent2api_providers"
+path = "src/lib.rs"
+crate-type = ["staticlib", "rlib"]
+
 [[bin]]
 name = "agent2api-providers"
 path = "src/main.rs"
+required-features = ["bin"]
 
 # ── feature 设计 ────────────────────────────────────────────
 # `all` 打一个包含全部提供商的包（默认发布形态）。
@@ -18,7 +27,10 @@ path = "src/main.rs"
 # 只控制「编不编进二进制」，不改变任何行为。
 [features]
 default = ["all"]
-all = ["demo", "commandcode", "modelscope", "orcaterm", "loomy", "lobsterai", "raccoon", "atomcode", "autoclaw", "officeace", "zcode", "workbuddy", "cline", "kuku", "monkeycode", "qoder", "trae", "catpaw", "accio", "codearts", "antigravity", "doubaowork"]
+# `bin` 控制是否编译 spawn 用的可执行文件；iOS 静态库嵌入（进程内）不需要它。
+# `all` 保持默认发布形态 = 全部 provider + bin。
+all = ["bin", "demo", "commandcode", "modelscope", "orcaterm", "loomy", "lobsterai", "raccoon", "atomcode", "autoclaw", "officeace", "zcode", "workbuddy", "cline", "kuku", "monkeycode", "qoder", "trae", "catpaw", "accio", "codearts", "antigravity", "doubaowork"]
+bin = []
 demo = []
 commandcode = []
 modelscope = []

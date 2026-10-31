@@ -117,8 +117,10 @@ impl Cancel {
 pub(crate) struct Serve {
     /// 所有 provider（`Arc` 是为了让派发出去的 task 能持有）。
     providers: Vec<Arc<dyn Provider>>,
-    /// 网关的写端。
-    out: Mutex<tokio::io::Stdout>,
+    /// 网关的写端（默认 stdout，进程内模式时是内存管道写端）。
+    out: Mutex<crate::serve_options::InjectedWriter>,
+    /// 网关的读端（默认 stdin，进程内模式时是内存管道读端）。
+    input: Mutex<Option<crate::serve_options::InjectedReader>>,
     /// 回调的应答等待者。
     pending: Mutex<HashMap<i64, oneshot::Sender<Result<Value, proto::WireError>>>>,
     /// 下一个请求 id（0 保留给通知）。
@@ -141,9 +143,13 @@ struct Running {
 
 impl Serve {
     fn new(providers: Vec<BoxProvider>, options: ServeOptions) -> Self {
+        // 进程内模式注入内存管道；独立进程模式缺省走 stdin/stdout。
+        let input = options.reader;
+        let out = options.writer.unwrap_or_else(|| Box::new(tokio::io::stdout()));
         Self {
             providers: providers.into_iter().map(Arc::from).collect(),
-            out: Mutex::new(tokio::io::stdout()),
+            out: Mutex::new(out),
+            input: Mutex::new(input),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicI64::new(1),
             env: RwLock::new(None),
@@ -219,8 +225,12 @@ impl Serve {
     }
 
     async fn run(self: &Arc<Self>) -> std::io::Result<()> {
-        let stdin = tokio::io::stdin();
-        let mut reader = proto::frame::buffered(stdin);
+        // 进程内模式用注入的内存管道读端；独立进程模式缺省走 stdin。
+        let input = self.input.lock().await.take();
+        let mut reader = match input {
+            Some(reader) => proto::frame::buffered(reader),
+            None => proto::frame::buffered(tokio::io::stdin()),
+        };
         loop {
             match proto::read_frame(&mut reader).await {
                 Ok(Some(frame)) => match frame.kind() {
@@ -308,7 +318,11 @@ impl Serve {
                 match self.shutdown_providers().await {
                     Ok(()) => {
                         self.reply(id, Value::Null).await;
-                        std::process::exit(0);
+                        // 进程内模式不能 exit（会杀死宿主 App），只正常返回；
+                        // 独立进程模式 exit(0) 让网关感知子进程已退出。
+                        if !self.options.in_process {
+                            std::process::exit(0);
+                        }
                     }
                     Err(message) => self.reply_err(id, crate::errors::to_wire_error(message)).await,
                 }
