@@ -143,9 +143,11 @@ struct Running {
 
 impl Serve {
     fn new(providers: Vec<BoxProvider>, options: ServeOptions) -> Self {
+        // 先整体解构 options，避免「先 move 字段再 move 整体」的部分移动错误。
+        let ServeOptions { on_init, reader, writer, in_process } = options;
         // 进程内模式注入内存管道；独立进程模式缺省走 stdin/stdout。
-        let input = options.reader;
-        let out = options.writer.unwrap_or_else(|| Box::new(tokio::io::stdout()));
+        let input = reader;
+        let out = writer.unwrap_or_else(|| Box::new(tokio::io::stdout()));
         Self {
             providers: providers.into_iter().map(Arc::from).collect(),
             out: Mutex::new(out),
@@ -153,7 +155,7 @@ impl Serve {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicI64::new(1),
             env: RwLock::new(None),
-            options,
+            options: ServeOptions { on_init, reader: None, writer: None, in_process },
             running: Mutex::new(HashMap::new()),
             closing: AtomicBool::new(false),
             cleanup: Mutex::new(None),
@@ -226,11 +228,13 @@ impl Serve {
 
     async fn run(self: &Arc<Self>) -> std::io::Result<()> {
         // 进程内模式用注入的内存管道读端；独立进程模式缺省走 stdin。
+        // 统一包成 `Box<dyn AsyncRead>` 再 buffered，避免两分支 BufReader 泛型不一致。
         let input = self.input.lock().await.take();
-        let mut reader = match input {
-            Some(reader) => proto::frame::buffered(reader),
-            None => proto::frame::buffered(tokio::io::stdin()),
+        let reader: crate::serve_options::InjectedReader = match input {
+            Some(reader) => reader,
+            None => Box::new(tokio::io::stdin()),
         };
+        let mut reader = proto::frame::buffered(reader);
         loop {
             match proto::read_frame(&mut reader).await {
                 Ok(Some(frame)) => match frame.kind() {

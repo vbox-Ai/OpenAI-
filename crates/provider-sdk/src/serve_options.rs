@@ -4,9 +4,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::provider::BoxProvider;
 
 /// 可替换的读端（默认 stdin，进程内模式时换成内存管道读端）。
-pub type InjectedReader = Box<dyn AsyncRead + Unpin + Send>;
+///
+/// `+ Sync`：`serve` 把这些句柄包进 `Mutex` 跨 task 共享，而 `Mutex<T>` 的
+/// `Send + Sync` 要求 `T: Send`。`tokio::io::Stdout` / `DuplexStream` 都是
+/// `Send + Sync`，加这个约束让 trait object 与它们一致。
+pub type InjectedReader = Box<dyn AsyncRead + Unpin + Send + Sync>;
 /// 可替换的写端（默认 stdout，进程内模式时换成内存管道写端）。
-pub type InjectedWriter = Box<dyn AsyncWrite + Unpin + Send>;
+pub type InjectedWriter = Box<dyn AsyncWrite + Unpin + Send + Sync>;
 
 #[derive(Default)]
 pub struct ServeOptions {

@@ -80,8 +80,8 @@ pub fn run_standalone() {
 /// 独立 task / 线程里驱动它，不能占住自己的事件循环。`shutdown` 时**不会**
 /// `process::exit`（那会杀死宿主 App），只正常返回。
 pub async fn serve_inprocess(
-    reader: Box<dyn AsyncRead + Unpin + Send>,
-    writer: Box<dyn AsyncWrite + Unpin + Send>,
+    reader: Box<dyn AsyncRead + Unpin + Send + Sync>,
+    writer: Box<dyn AsyncWrite + Unpin + Send + Sync>,
 ) -> std::io::Result<()> {
     let providers = providers::registry();
     let options = agent2api_provider_sdk::ServeOptions {
