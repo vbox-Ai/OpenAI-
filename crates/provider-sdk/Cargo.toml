@@ -14,7 +14,12 @@ homepage = "https://github.com/aimod-cc/Agent2API"
 # 进程就变成网关能加载的提供商宿主。所有 IPC、背压、取消、日志回传
 # 都由这里的 `serve()` 处理掉 —— 作者不该看见一个帧。
 [dependencies]
-agent2api-provider-protocol = { path = "../provider-protocol" }
+# 进程内嵌入（iOS）需要网关与 providers 引用**同一个协议 crate 实例**，
+# 否则网关的 proto::Frame 与 providers 的 proto::Frame 是两个不同类型。
+# 因此这里与网关（server/Cargo.toml）一致，按 git tag 引用上游协议库，
+# 不再走 workspace 相对路径。本地联调改协议用仓库根 .cargo/config.toml 的
+# [patch] 指向本地路径。
+agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2Providers", tag = "v3.3.0-beta.6" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std"] }

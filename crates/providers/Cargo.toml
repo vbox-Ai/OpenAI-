@@ -58,9 +58,10 @@ doubaowork = []
 syn = { version = "2", features = ["full", "visit"] }
 
 [dependencies]
-# 同仓库内的两个契约 crate（工作区成员）。网关侧按 git tag 引用它们的
-# 发布版本，插件这边直接走相对路径 —— 改协议时本地立刻生效。
-agent2api-provider-protocol = { path = "../provider-protocol" }
+# 进程内嵌入（iOS）：协议 crate 必须与网关（server/Cargo.toml）引用**同一个
+# git tag**，否则网关与 providers 各持一份 protocol，proto::Frame 类型对不上。
+# sdk 仍走相对路径（它是本仓库内部实现，网关不直接依赖它）。
+agent2api-provider-protocol = { git = "https://github.com/ProvidersPlugin/Agent2Providers", tag = "v3.3.0-beta.6" }
 agent2api-provider-sdk = { path = "../provider-sdk" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

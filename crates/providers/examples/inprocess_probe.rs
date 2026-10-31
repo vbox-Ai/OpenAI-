@@ -77,10 +77,10 @@ async fn main() {
 
     println!("=== 握手成功，收到 {} 家 provider ===", infos.len());
     for info in &infos {
-        println!("  - id={} label={}", info.id.as_ref(), info.label);
+        println!("  - id={} label={}", info.id.as_str(), info.label);
     }
 
-    let has_workbuddy = infos.iter().any(|i| i.id.as_ref() == "workbuddy");
+    let has_workbuddy = infos.iter().any(|i| i.id.as_str() == "workbuddy");
     assert!(has_workbuddy, "provider 列表里没有 workbuddy！");
 
     // 发 PING 再收一次，验证双向通信稳定
@@ -99,7 +99,7 @@ async fn main() {
     assert_eq!(pong.id, 2);
     assert!(pong.error.is_none(), "PING 失败: {:?}", pong.error);
 
-    // 发 shutdown（进程内模式：serve 不 exit，只返回）
+    // 发 shutdown（进程内模式：serve 不 exit，只返回；靠写端关闭触发 EOF 退出）
     let shutdown = proto::Frame {
         id: 3,
         method: Some(proto::methods::gateway::SHUTDOWN.to_string()),
@@ -107,6 +107,10 @@ async fn main() {
         ..Default::default()
     };
     proto::write_frame(&mut writer, &shutdown).await.expect("写 shutdown 失败");
+
+    // 关键：drop 写端，让 serve 的读端读到 EOF 从而退出主循环。
+    // 进程内模式没有 process::exit，退出靠「网关关闭写端 → serve 读 EOF」。
+    drop(writer);
 
     // 等 serve task 正常退出（进程内模式 shutdown 后返回 Ok）
     let serve_result = tokio::time::timeout(Duration::from_secs(10), serve_task)
