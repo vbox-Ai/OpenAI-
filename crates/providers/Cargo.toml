@@ -64,7 +64,7 @@ agent2api-provider-protocol = { path = "../provider-protocol" }
 agent2api-provider-sdk = { path = "../provider-sdk" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util"] }
 # 各家的 HTTP 出网（与网关同一条栈：rustls，不依赖系统 openssl）
 # `system-proxy`：Antigravity 是仓内唯一「账号没配代理时跟随系统代理」的家
 # （上游是 Google，多数网络里只有经代理才可达，见 `antigravity/mod.rs` 的

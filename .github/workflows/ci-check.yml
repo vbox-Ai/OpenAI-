@@ -27,3 +27,11 @@ jobs:
       - name: cargo check（默认 all + bin，确认没破坏独立进程形态）
         run: |
           cargo check -p agent2api-providers
+
+      - name: 运行 inprocess_probe（进程内握手验证）
+        # 实际跑 serve_inprocess：发 INIT 握手 → 收 provider 列表 → PING → shutdown，
+        # 证明进程内（不 spawn）整条 RPC 链路可用。
+        run: |
+          cargo run --example inprocess_probe \
+            --no-default-features --features workbuddy,raccoon \
+            -p agent2api-providers
