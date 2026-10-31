@@ -18,9 +18,10 @@ jobs:
       - name: 安装 Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: cargo check（lib 形态，仅 workbuddy，无 bin）
+      - name: cargo check（lib 形态，workbuddy + raccoon，无 bin）
+        # workbuddy 复用 raccoon::jwt，所以最小 POC 需带 raccoon
         run: |
-          cargo check --no-default-features --features workbuddy \
+          cargo check --no-default-features --features workbuddy,raccoon \
             -p agent2api-providers
 
       - name: cargo check（默认 all + bin，确认没破坏独立进程形态）
